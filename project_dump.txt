@@ -1,0 +1,2244 @@
+===== ./app/api/__init__.py =====
+
+===== ./app/api/v1/auth.py =====
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import redis.asyncio as aioredis
+from app.core.dependencies import get_current_user, get_db, get_redis
+from app.models import User
+from app.schemas import APIResponse, LoginRequest, RefreshRequest, RegisterRequest, TokenResponse, UserResponse
+from app.services.auth import AuthService
+
+router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.post("/register")
+async def register(
+    body: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = AuthService(db, redis)
+    user, tokens = await service.register(body.email, body.password, body.base_currency)
+    return APIResponse(data={"user": UserResponse.model_validate(user), **tokens.model_dump()})
+
+
+@router.post("/login")
+async def login(
+    body: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = AuthService(db, redis)
+    user, tokens = await service.login(body.email, body.password)
+    return APIResponse(data={"user": UserResponse.model_validate(user), **tokens.model_dump()})
+
+
+@router.post("/refresh")
+async def refresh(
+    body: RefreshRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = AuthService(db, redis)
+    tokens = await service.refresh(body.refresh_token)
+    return APIResponse(data=tokens)
+
+
+@router.post("/logout")
+async def logout(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = AuthService(db, redis)
+    await service.logout(current_user.id)
+    return APIResponse(data=None, message="Logged out successfully")
+
+===== ./app/api/v1/budgets.py =====
+import uuid
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db
+from app.models import User
+from app.schemas import APIResponse, BudgetResponse, CreateBudgetRequest, UpdateBudgetRequest
+from app.services.budget import BudgetService
+
+router = APIRouter(prefix="/budgets", tags=["budgets"])
+
+
+@router.get("/")
+async def list_budgets(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = BudgetService(db)
+    budgets = await service.list(current_user)
+    return APIResponse(data=[BudgetResponse.model_validate(b) for b in budgets])
+
+
+@router.post("/")
+async def create_budget(
+    body: CreateBudgetRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = BudgetService(db)
+    budget = await service.create(current_user, body.model_dump())
+    return APIResponse(data=BudgetResponse.model_validate(budget))
+
+
+@router.get("/{id}")
+async def get_budget(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = BudgetService(db)
+    budget = await service.get(current_user, id)
+    return APIResponse(data=BudgetResponse.model_validate(budget))
+
+
+@router.patch("/{id}")
+async def update_budget(
+    id: uuid.UUID,
+    body: UpdateBudgetRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = BudgetService(db)
+    budget = await service.update(current_user, id, body.model_dump())
+    return APIResponse(data=BudgetResponse.model_validate(budget))
+
+
+@router.delete("/{id}")
+async def delete_budget(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = BudgetService(db)
+    await service.delete(current_user, id)
+    return APIResponse(data=None, message="Budget deleted")
+
+===== ./app/api/v1/categories.py =====
+import uuid
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db
+from app.models import User
+from app.schemas import APIResponse, CategoryResponse, CreateCategoryRequest, UpdateCategoryRequest
+from app.services.category import CategoryService
+
+router = APIRouter(prefix="/categories", tags=["categories"])
+
+
+@router.get("/")
+async def list_categories(
+    type: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = CategoryService(db)
+    categories = await service.list(current_user, type=type)
+    return APIResponse(data=[CategoryResponse.model_validate(c) for c in categories])
+
+
+@router.post("/")
+async def create_category(
+    body: CreateCategoryRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = CategoryService(db)
+    category = await service.create(current_user, body.name, body.type, body.icon)
+    return APIResponse(data=CategoryResponse.model_validate(category))
+
+
+@router.patch("/{id}")
+async def update_category(
+    id: uuid.UUID,
+    body: UpdateCategoryRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = CategoryService(db)
+    category = await service.update(current_user, id, body.model_dump())
+    return APIResponse(data=CategoryResponse.model_validate(category))
+
+
+@router.delete("/{id}")
+async def delete_category(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = CategoryService(db)
+    await service.delete(current_user, id)
+    return APIResponse(data=None, message="Category deleted")
+
+===== ./app/api/v1/__init__.py =====
+
+===== ./app/api/v1/rates.py =====
+import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db, get_redis
+from app.models import User
+from app.schemas import APIResponse, RateResponse
+from app.services.rate import RateService
+
+router = APIRouter(prefix="/rates", tags=["rates"])
+
+
+@router.get("/current")
+async def get_current_rate(
+    from_currency: str = Query(...),
+    to_currency: str = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = RateService(db, redis)
+    rate, cached = await service.get_rate(from_currency, to_currency, current_user.id)
+    return APIResponse(
+        data=RateResponse(
+            from_currency=from_currency,
+            to_currency=to_currency,
+            rate=rate,
+            cached=cached,
+        )
+    )
+
+===== ./app/api/v1/reports.py =====
+from datetime import date
+
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db
+from app.models import User
+from app.schemas import APIResponse
+from app.services.budget import BudgetService
+from app.services.report import ReportService
+
+router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+@router.get("/summary")
+async def summary(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReportService(db)
+    result = await service.summary(current_user, start_date, end_date)
+    return APIResponse(data=result)
+
+
+@router.get("/by-category")
+async def by_category(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    type: str = Query("expense"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReportService(db)
+    result = await service.by_category(current_user, start_date, end_date, type)
+    return APIResponse(data=result)
+
+
+@router.get("/trend")
+async def trend(
+    start_date: date = Query(...),
+    end_date: date = Query(...),
+    group_by: str = Query("month"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReportService(db)
+    result = await service.trend(current_user, start_date, end_date, group_by)
+    return APIResponse(data=result)
+
+
+@router.get("/budget-status")
+async def budget_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = BudgetService(db)
+    budgets = await service.list(current_user)
+    budgets_sorted = sorted(
+        budgets,
+        key=lambda b: b.utilisation.percentage if b.utilisation else 0,
+        reverse=True,
+    )
+    from app.schemas import BudgetResponse
+    return APIResponse(data=[BudgetResponse.model_validate(b) for b in budgets_sorted])
+
+===== ./app/api/v1/router.py =====
+from fastapi import APIRouter
+
+from app.api.v1 import auth, budgets, categories, rates, reports, transactions, users
+
+router = APIRouter(prefix="/api/v1")
+
+router.include_router(auth.router)
+router.include_router(users.router)
+router.include_router(categories.router)
+router.include_router(transactions.router)
+router.include_router(budgets.router)
+router.include_router(reports.router)
+router.include_router(rates.router)
+
+===== ./app/api/v1/transactions.py =====
+import uuid
+from datetime import date
+from typing import Optional
+
+import redis.asyncio as aioredis
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db, get_redis
+from app.models import User
+from app.schemas import (
+    APIResponse,
+    CreateTransactionRequest,
+    PaginatedResponse,
+    TransactionResponse,
+    UpdateTransactionRequest,
+)
+from app.services.transaction import TransactionService
+
+router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+@router.get("/")
+async def list_transactions(
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    type: Optional[str] = Query(None),
+    category_id: Optional[uuid.UUID] = Query(None),
+    currency: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = TransactionService(db, redis)
+    transactions, total = await service.list(
+        current_user,
+        start_date=start_date,
+        end_date=end_date,
+        type=type,
+        category_id=category_id,
+        currency=currency,
+        source=source,
+        page=page,
+        limit=limit,
+    )
+    return APIResponse(
+        data=PaginatedResponse(
+            data=[TransactionResponse.model_validate(t) for t in transactions],
+            total=total,
+            page=page,
+            limit=limit,
+        )
+    )
+
+
+@router.post("/")
+async def create_transaction(
+    body: CreateTransactionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = TransactionService(db, redis)
+    tx = await service.create(
+        current_user,
+        type=body.type,
+        amount=body.amount,
+        currency=body.currency,
+        category_id=body.category_id,
+        description=body.description,
+        transaction_date=body.transaction_date,
+    )
+    return APIResponse(data=TransactionResponse.model_validate(tx))
+
+
+@router.get("/{id}")
+async def get_transaction(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = TransactionService(db, redis)
+    tx = await service.repo.get_by_id(id)
+    from app.core.exceptions import ForbiddenError, NotFoundError
+    if not tx:
+        raise NotFoundError("Transaction not found")
+    if tx.user_id != current_user.id:
+        raise ForbiddenError()
+    return APIResponse(data=TransactionResponse.model_validate(tx))
+
+
+@router.patch("/{id}")
+async def update_transaction(
+    id: uuid.UUID,
+    body: UpdateTransactionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = TransactionService(db, redis)
+    tx = await service.update(current_user, id, body.model_dump())
+    return APIResponse(data=TransactionResponse.model_validate(tx))
+
+
+@router.delete("/{id}")
+async def delete_transaction(
+    id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    service = TransactionService(db, redis)
+    await service.delete(current_user, id)
+    return APIResponse(data=None, message="Transaction deleted")
+
+===== ./app/api/v1/users.py =====
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db
+from app.models import User
+from app.schemas import APIResponse, ChangePasswordRequest, UpdateUserRequest, UserResponse
+from app.services.user import UserService
+
+router = APIRouter(prefix="/users", tags=["users"])
+
+
+@router.get("/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    return APIResponse(data=UserResponse.model_validate(current_user))
+
+
+@router.patch("/me")
+async def update_me(
+    body: UpdateUserRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = UserService(db)
+    user = await service.update(current_user, body.model_dump())
+    return APIResponse(data=UserResponse.model_validate(user))
+
+
+@router.patch("/me/password")
+async def change_password(
+    body: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = UserService(db)
+    await service.change_password(current_user, body.current_password, body.new_password)
+    return APIResponse(data=None, message="Password updated")
+
+
+@router.delete("/me")
+async def delete_me(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = UserService(db)
+    await service.delete(current_user)
+    return APIResponse(data=None, message="Account deleted")
+
+===== ./app/core/config.py =====
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    DB_URL: str = ""
+    REDIS_URL: str = ""
+    JWT_SECRET: str = "changeme"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    EXCHANGE_RATE_API_KEY: str = "dummy"
+    EXCHANGE_RATE_API_URL: str = "https://openexchangerates.org/api"
+    EXCHANGE_RATE_CACHE_TTL: int = 3600
+    ENVIRONMENT: str = "development"
+    PORT: int = 8000
+
+    @property
+    def async_database_url(self) -> str:
+        url = self.DB_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
+
+    class Config:
+        env_file = ".env"
+
+
+settings = Settings()
+
+===== ./app/core/dependencies.py =====
+from typing import AsyncGenerator
+
+import redis.asyncio as aioredis
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.exceptions import UnauthorizedError
+from app.core.security import decode_token
+from app.db.session import async_session_factory
+from app.repositories.user import UserRepository
+
+bearer_scheme = HTTPBearer()
+
+
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    async with async_session_factory() as session:
+        yield session
+
+
+async def get_redis() -> aioredis.Redis:
+    return aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+):
+    payload = decode_token(credentials.credentials)
+    if not payload or payload.get("type") != "access":
+        raise UnauthorizedError("Invalid or expired token")
+
+    user_id = payload.get("sub")
+    repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+
+    if not user or user.is_deleted:
+        raise UnauthorizedError("User not found")
+
+    return user
+
+===== ./app/core/exceptions.py =====
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+
+class AppException(Exception):
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        self.message = message
+
+
+class NotFoundError(AppException):
+    def __init__(self, message: str = "Resource not found"):
+        super().__init__(404, message)
+
+
+class UnauthorizedError(AppException):
+    def __init__(self, message: str = "Unauthorized"):
+        super().__init__(401, message)
+
+
+class ForbiddenError(AppException):
+    def __init__(self, message: str = "Forbidden"):
+        super().__init__(403, message)
+
+
+class ConflictError(AppException):
+    def __init__(self, message: str = "Conflict"):
+        super().__init__(409, message)
+
+
+class BadRequestError(AppException):
+    def __init__(self, message: str = "Bad request"):
+        super().__init__(400, message)
+
+
+async def app_exception_handler(request: Request, exc: AppException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "message": exc.message},
+    )
+
+
+async def generic_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": "An unexpected error occurred"},
+    )
+
+===== ./app/core/__init__.py =====
+
+===== ./app/core/security.py =====
+from datetime import datetime, timedelta
+from typing import Optional
+
+import bcrypt
+from jose import JWTError, jwt
+
+from app.core.config import settings
+
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+
+
+def create_access_token(user_id: str) -> str:
+    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    return jwt.encode(
+        {"sub": user_id, "exp": expire, "type": "access"},
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+
+def create_refresh_token(user_id: str) -> str:
+    expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    return jwt.encode(
+        {"sub": user_id, "exp": expire, "type": "refresh"},
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+
+
+def decode_token(token: str) -> Optional[dict]:
+    try:
+        return jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+    except JWTError:
+        return None
+
+===== ./app/db/base.py =====
+import uuid
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class SoftDeleteMixin:
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class BaseModel(Base, TimestampMixin, SoftDeleteMixin):
+    __abstract__ = True
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+
+===== ./app/db/__init__.py =====
+
+===== ./app/db/migrations/env.py =====
+import asyncio
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import pool
+from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from app.core.config import settings
+from app.db.base import Base
+from app.models import *  # noqa: F401,F403
+
+config = context.config
+config.set_main_option("sqlalchemy.url", settings.async_database_url)
+
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
+
+
+def run_migrations_offline() -> None:
+    context.configure(
+        url=settings.async_database_url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def do_run_migrations(connection):
+    context.configure(connection=connection, target_metadata=target_metadata)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations() -> None:
+    connectable = async_engine_from_config(
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+    await connectable.dispose()
+
+
+def run_migrations_online() -> None:
+    asyncio.run(run_async_migrations())
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+===== ./app/db/migrations/__init__.py =====
+
+===== ./app/db/migrations/versions/f7296b561349_initial.py =====
+"""initial
+
+Revision ID: f7296b561349
+Revises: 
+Create Date: 2026-04-11 19:09:40.875334
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'f7296b561349'
+down_revision: Union[str, None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('default_categories',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('name', sa.String(length=100), nullable=False),
+    sa.Column('type', sa.String(length=20), nullable=False),
+    sa.Column('icon', sa.String(length=50), nullable=True),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('users',
+    sa.Column('email', sa.String(length=255), nullable=False),
+    sa.Column('hashed_password', sa.String(length=255), nullable=False),
+    sa.Column('base_currency', sa.String(length=10), nullable=False),
+    sa.Column('role', sa.String(length=20), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('is_deleted', sa.Boolean(), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_users_email'), 'users', ['email'], unique=True)
+    op.create_table('categories',
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('seeded_from', sa.UUID(), nullable=True),
+    sa.Column('name', sa.String(length=100), nullable=False),
+    sa.Column('type', sa.String(length=20), nullable=False),
+    sa.Column('icon', sa.String(length=50), nullable=True),
+    sa.Column('is_default', sa.Boolean(), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('is_deleted', sa.Boolean(), nullable=False),
+    sa.ForeignKeyConstraint(['seeded_from'], ['default_categories.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_categories_user_id'), 'categories', ['user_id'], unique=False)
+    op.create_table('exchange_rate_snapshots',
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('from_currency', sa.String(length=10), nullable=False),
+    sa.Column('to_currency', sa.String(length=10), nullable=False),
+    sa.Column('rate', sa.Numeric(precision=18, scale=6), nullable=False),
+    sa.Column('captured_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('budgets',
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('category_id', sa.UUID(), nullable=False),
+    sa.Column('amount', sa.Numeric(precision=18, scale=2), nullable=False),
+    sa.Column('currency', sa.String(length=10), nullable=False),
+    sa.Column('period', sa.String(length=20), nullable=False),
+    sa.Column('start_date', sa.Date(), nullable=False),
+    sa.Column('is_recurring', sa.Boolean(), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('is_deleted', sa.Boolean(), nullable=False),
+    sa.ForeignKeyConstraint(['category_id'], ['categories.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('transactions',
+    sa.Column('user_id', sa.UUID(), nullable=False),
+    sa.Column('category_id', sa.UUID(), nullable=False),
+    sa.Column('type', sa.String(length=20), nullable=False),
+    sa.Column('amount', sa.Numeric(precision=18, scale=2), nullable=False),
+    sa.Column('currency', sa.String(length=10), nullable=False),
+    sa.Column('exchange_rate_to_base', sa.Numeric(precision=18, scale=6), nullable=False),
+    sa.Column('amount_in_base', sa.Numeric(precision=18, scale=2), nullable=False),
+    sa.Column('description', sa.String(length=500), nullable=True),
+    sa.Column('source', sa.String(length=20), nullable=False),
+    sa.Column('transaction_date', sa.Date(), nullable=False),
+    sa.Column('id', sa.UUID(), nullable=False),
+    sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
+    sa.Column('is_deleted', sa.Boolean(), nullable=False),
+    sa.ForeignKeyConstraint(['category_id'], ['categories.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_transactions_transaction_date'), 'transactions', ['transaction_date'], unique=False)
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index(op.f('ix_transactions_transaction_date'), table_name='transactions')
+    op.drop_table('transactions')
+    op.drop_table('budgets')
+    op.drop_table('exchange_rate_snapshots')
+    op.drop_index(op.f('ix_categories_user_id'), table_name='categories')
+    op.drop_table('categories')
+    op.drop_index(op.f('ix_users_email'), table_name='users')
+    op.drop_table('users')
+    op.drop_table('default_categories')
+    # ### end Alembic commands ###
+
+===== ./app/db/session.py =====
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.core.config import settings
+
+engine = create_async_engine(
+    settings.async_database_url,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+)
+
+async_session_factory = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+===== ./app/ingestion/__init__.py =====
+
+===== ./app/ingestion/pipeline.py =====
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+
+
+@dataclass
+class TransactionPayload:
+    """
+    Normalised transaction payload consumed by the pipeline regardless of source.
+    SMS parser, Mono webhook, or manual entry all produce this shape.
+    """
+    type: str
+    amount: Decimal
+    currency: str
+    category_id: str
+    transaction_date: date
+    description: str | None = None
+    source: str = "manual"
+
+
+class IngestionPipeline:
+    """
+    The pipeline receives a TransactionPayload and persists it.
+    Source adapters (manual, sms, mono) are responsible for normalising
+    their raw data into a TransactionPayload before calling run().
+    """
+
+    def __init__(self, transaction_service):
+        self.transaction_service = transaction_service
+
+    async def run(self, user, payload: TransactionPayload):
+        return await self.transaction_service.create(
+            user=user,
+            type=payload.type,
+            amount=payload.amount,
+            currency=payload.currency,
+            category_id=payload.category_id,
+            description=payload.description,
+            transaction_date=payload.transaction_date,
+            source=payload.source,
+        )
+
+===== ./app/ingestion/sources/__init__.py =====
+
+===== ./app/ingestion/sources/manual.py =====
+from datetime import date
+from decimal import Decimal
+
+from app.ingestion.pipeline import TransactionPayload
+
+
+def build_manual_payload(
+    type: str,
+    amount: Decimal,
+    currency: str,
+    category_id: str,
+    transaction_date: date,
+    description: str | None = None,
+) -> TransactionPayload:
+    """
+    Adapts a manual API request into a normalised TransactionPayload.
+    Future adapters (sms.py, mono.py) follow the same contract.
+    """
+    return TransactionPayload(
+        type=type,
+        amount=amount,
+        currency=currency,
+        category_id=category_id,
+        transaction_date=transaction_date,
+        description=description,
+        source="manual",
+    )
+
+===== ./app/__init__.py =====
+# app
+
+===== ./app/main.py =====
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.v1.router import router
+from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
+
+app = FastAPI(
+    title="PocketLedger API",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://skillful-harmony-production.up.railway.app",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_exception_handler(AppException, app_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
+
+app.include_router(router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+===== ./app/models/__init__.py =====
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    func,
+)
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db.base import Base, BaseModel
+
+
+class User(BaseModel):
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_currency: Mapped[str] = mapped_column(String(10), nullable=False, default="NGN")
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+
+    categories: Mapped[list["Category"]] = relationship(back_populates="user")
+    transactions: Mapped[list["Transaction"]] = relationship(back_populates="user")
+    budgets: Mapped[list["Budget"]] = relationship(back_populates="user")
+
+
+class DefaultCategory(Base):
+    __tablename__ = "default_categories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    type: Mapped[str] = mapped_column(String(20), nullable=False)
+    icon: Mapped[str] = mapped_column(String(50), nullable=True)
+
+    seeded_categories: Mapped[list["Category"]] = relationship(back_populates="seeded_from_default")
+
+
+class Category(BaseModel):
+    __tablename__ = "categories"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    seeded_from: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("default_categories.id"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    type: Mapped[str] = mapped_column(String(20), nullable=False)
+    icon: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    user: Mapped["User"] = relationship(back_populates="categories")
+    seeded_from_default: Mapped["DefaultCategory | None"] = relationship(back_populates="seeded_categories")
+    transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")
+    budgets: Mapped[list["Budget"]] = relationship(back_populates="category")
+
+
+class Transaction(BaseModel):
+    __tablename__ = "transactions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(20), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False)
+    exchange_rate_to_base: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    amount_in_base: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    transaction_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+
+    user: Mapped["User"] = relationship(back_populates="transactions")
+    category: Mapped["Category"] = relationship(back_populates="transactions")
+
+
+class Budget(BaseModel):
+    __tablename__ = "budgets"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False
+    )
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    currency: Mapped[str] = mapped_column(String(10), nullable=False)
+    period: Mapped[str] = mapped_column(String(20), nullable=False, default="monthly")
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    is_recurring: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    user: Mapped["User"] = relationship(back_populates="budgets")
+    category: Mapped["Category"] = relationship(back_populates="budgets")
+
+
+class ExchangeRateSnapshot(Base):
+    __tablename__ = "exchange_rate_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    from_currency: Mapped[str] = mapped_column(String(10), nullable=False)
+    to_currency: Mapped[str] = mapped_column(String(10), nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+===== ./app/repositories/base.py =====
+import uuid
+from typing import Any, Generic, Type, TypeVar
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.base import BaseModel
+
+ModelType = TypeVar("ModelType", bound=BaseModel)
+
+
+class BaseRepository(Generic[ModelType]):
+    def __init__(self, model: Type[ModelType], db: AsyncSession):
+        self.model = model
+        self.db = db
+
+    async def get_by_id(self, id: uuid.UUID) -> ModelType | None:
+        result = await self.db.execute(
+            select(self.model).where(self.model.id == id, self.model.is_deleted == False)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_all(self, **filters) -> list[ModelType]:
+        query = select(self.model).where(self.model.is_deleted == False)
+        for key, value in filters.items():
+            query = query.where(getattr(self.model, key) == value)
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+
+    async def create(self, data: dict[str, Any]) -> ModelType:
+        instance = self.model(**data)
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        return instance
+
+    async def update(self, id: uuid.UUID, data: dict[str, Any]) -> ModelType | None:
+        await self.db.execute(
+            update(self.model)
+            .where(self.model.id == id, self.model.is_deleted == False)
+            .values(**data)
+        )
+        await self.db.commit()
+        return await self.get_by_id(id)
+
+    async def soft_delete(self, id: uuid.UUID) -> bool:
+        await self.db.execute(
+            update(self.model)
+            .where(self.model.id == id, self.model.is_deleted == False)
+            .values(is_deleted=True)
+        )
+        await self.db.commit()
+        return True
+
+===== ./app/repositories/budget.py =====
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.models import Budget
+from app.repositories.base import BaseRepository
+
+
+class BudgetRepository(BaseRepository[Budget]):
+    def __init__(self, db: AsyncSession):
+        super().__init__(Budget, db)
+
+    async def get_by_id(self, id: uuid.UUID) -> Budget | None:
+        result = await self.db.execute(
+            select(Budget)
+            .where(Budget.id == id, Budget.is_deleted == False)
+            .options(selectinload(Budget.category))
+        )
+        return result.scalar_one_or_none()
+
+    async def create(self, data: dict) -> Budget:
+        instance = Budget(**data)
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        return await self.get_by_id(instance.id)
+
+    async def get_all_for_user(self, user_id: uuid.UUID) -> list[Budget]:
+        result = await self.db.execute(
+            select(Budget)
+            .where(Budget.user_id == user_id, Budget.is_deleted == False)
+            .options(selectinload(Budget.category))
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id_for_user(self, id: uuid.UUID, user_id: uuid.UUID) -> Budget | None:
+        result = await self.db.execute(
+            select(Budget)
+            .where(Budget.id == id, Budget.user_id == user_id, Budget.is_deleted == False)
+            .options(selectinload(Budget.category))
+        )
+        return result.scalar_one_or_none()
+
+===== ./app/repositories/category.py =====
+import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Category, DefaultCategory
+from app.repositories.base import BaseRepository
+
+
+class CategoryRepository(BaseRepository[Category]):
+    def __init__(self, db: AsyncSession):
+        super().__init__(Category, db)
+
+    async def get_all_for_user(self, user_id: uuid.UUID, type: str | None = None) -> list[Category]:
+        query = select(Category).where(Category.user_id == user_id, Category.is_deleted == False)
+        if type:
+            query = query.where(Category.type == type)
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+
+    async def has_linked_transactions(self, category_id: uuid.UUID) -> bool:
+        from app.models import Transaction
+        result = await self.db.execute(
+            select(Transaction.id).where(
+                Transaction.category_id == category_id,
+                Transaction.is_deleted == False,
+            ).limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def has_active_budget(self, category_id: uuid.UUID) -> bool:
+        from app.models import Budget
+        result = await self.db.execute(
+            select(Budget.id).where(
+                Budget.category_id == category_id,
+                Budget.is_deleted == False,
+            ).limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def get_defaults(self) -> list[DefaultCategory]:
+        result = await self.db.execute(select(DefaultCategory))
+        return list(result.scalars().all())
+
+    async def seed_defaults_for_user(self, user_id: uuid.UUID) -> None:
+        defaults = await self.get_defaults()
+        for default in defaults:
+            category = Category(
+                user_id=user_id,
+                seeded_from=default.id,
+                name=default.name,
+                type=default.type,
+                icon=default.icon,
+                is_default=True,
+            )
+            self.db.add(category)
+        await self.db.commit()
+
+===== ./app/repositories/exchange_rate_snapshot.py =====
+import uuid
+from decimal import Decimal
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import ExchangeRateSnapshot
+
+
+class ExchangeRateSnapshotRepository:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def create(self, user_id: uuid.UUID, from_currency: str, to_currency: str, rate: Decimal) -> None:
+        snapshot = ExchangeRateSnapshot(
+            user_id=user_id,
+            from_currency=from_currency,
+            to_currency=to_currency,
+            rate=rate,
+        )
+        self.db.add(snapshot)
+        await self.db.commit()
+
+===== ./app/repositories/__init__.py =====
+
+===== ./app/repositories/transaction.py =====
+import uuid
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.models import Transaction
+from app.repositories.base import BaseRepository
+
+
+class TransactionRepository(BaseRepository[Transaction]):
+    def __init__(self, db: AsyncSession):
+        super().__init__(Transaction, db)
+
+    async def get_by_id(self, id: uuid.UUID) -> Transaction | None:
+        result = await self.db.execute(
+            select(Transaction)
+            .where(Transaction.id == id, Transaction.is_deleted == False)
+            .options(selectinload(Transaction.category))
+        )
+        return result.scalar_one_or_none()
+
+    async def create(self, data: dict) -> Transaction:
+        instance = Transaction(**data)
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        return await self.get_by_id(instance.id)
+
+    async def get_paginated(
+        self,
+        user_id: uuid.UUID,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        type: str | None = None,
+        category_id: uuid.UUID | None = None,
+        currency: str | None = None,
+        source: str | None = None,
+        page: int = 1,
+        limit: int = 20,
+    ) -> tuple[list[Transaction], int]:
+        query = (
+            select(Transaction)
+            .where(Transaction.user_id == user_id, Transaction.is_deleted == False)
+            .options(selectinload(Transaction.category))
+        )
+        if start_date:
+            query = query.where(Transaction.transaction_date >= start_date)
+        if end_date:
+            query = query.where(Transaction.transaction_date <= end_date)
+        if type:
+            query = query.where(Transaction.type == type)
+        if category_id:
+            query = query.where(Transaction.category_id == category_id)
+        if currency:
+            query = query.where(Transaction.currency == currency)
+        if source:
+            query = query.where(Transaction.source == source)
+
+        count_result = await self.db.execute(
+            select(func.count()).select_from(query.subquery())
+        )
+        total = count_result.scalar_one()
+
+        query = query.order_by(Transaction.transaction_date.desc()).offset((page - 1) * limit).limit(limit)
+        result = await self.db.execute(query)
+        return list(result.scalars().all()), total
+
+    async def get_total_by_category_in_period(
+        self,
+        user_id: uuid.UUID,
+        category_id: uuid.UUID,
+        start_date: date,
+        end_date: date,
+    ) -> Decimal:
+        result = await self.db.execute(
+            select(func.coalesce(func.sum(Transaction.amount_in_base), 0)).where(
+                Transaction.user_id == user_id,
+                Transaction.category_id == category_id,
+                Transaction.transaction_date >= start_date,
+                Transaction.transaction_date <= end_date,
+                Transaction.is_deleted == False,
+                Transaction.type == "expense",
+            )
+        )
+        return result.scalar_one()
+
+===== ./app/repositories/user.py =====
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import User
+from app.repositories.base import BaseRepository
+
+
+class UserRepository(BaseRepository[User]):
+    def __init__(self, db: AsyncSession):
+        super().__init__(User, db)
+
+    async def get_by_email(self, email: str) -> User | None:
+        result = await self.db.execute(
+            select(User).where(User.email == email, User.is_deleted == False)
+        )
+        return result.scalar_one_or_none()
+
+===== ./app/schemas/__init__.py =====
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Any, Generic, Optional, TypeVar
+
+from pydantic import BaseModel, EmailStr
+
+T = TypeVar("T")
+
+
+class APIResponse(BaseModel, Generic[T]):
+    status: str = "success"
+    data: T
+    message: Optional[str] = None
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    data: list[T]
+    total: int
+    page: int
+    limit: int
+
+
+# --- Auth ---
+
+class RegisterRequest(BaseModel):
+    email: EmailStr
+    password: str
+    base_currency: str = "NGN"
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+# --- User ---
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    email: str
+    base_currency: str
+    role: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UpdateUserRequest(BaseModel):
+    email: Optional[EmailStr] = None
+    base_currency: Optional[str] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+# --- Category ---
+
+class CategoryResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    type: str
+    icon: Optional[str]
+    is_default: bool
+
+    class Config:
+        from_attributes = True
+
+
+class CreateCategoryRequest(BaseModel):
+    name: str
+    type: str
+    icon: Optional[str] = None
+
+
+class UpdateCategoryRequest(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    icon: Optional[str] = None
+
+
+# --- Transaction ---
+
+class TransactionResponse(BaseModel):
+    id: uuid.UUID
+    type: str
+    amount: Decimal
+    currency: str
+    exchange_rate_to_base: Decimal
+    amount_in_base: Decimal
+    description: Optional[str]
+    source: str
+    transaction_date: date
+    category: CategoryResponse
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CreateTransactionRequest(BaseModel):
+    type: str
+    amount: Decimal
+    currency: str
+    category_id: uuid.UUID
+    description: Optional[str] = None
+    transaction_date: date
+
+
+class UpdateTransactionRequest(BaseModel):
+    description: Optional[str] = None
+    category_id: Optional[uuid.UUID] = None
+    transaction_date: Optional[date] = None
+
+
+# --- Budget ---
+
+class UtilisationSchema(BaseModel):
+    spent: Decimal
+    remaining: Decimal
+    percentage: float
+    period_start: date
+    period_end: date
+
+
+class BudgetResponse(BaseModel):
+    id: uuid.UUID
+    amount: Decimal
+    currency: str
+    period: str
+    start_date: date
+    is_recurring: bool
+    category: CategoryResponse
+    utilisation: Optional[UtilisationSchema] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CreateBudgetRequest(BaseModel):
+    category_id: uuid.UUID
+    amount: Decimal
+    currency: str
+    period: str = "monthly"
+    start_date: date
+    is_recurring: bool = True
+
+
+class UpdateBudgetRequest(BaseModel):
+    amount: Optional[Decimal] = None
+    period: Optional[str] = None
+    is_recurring: Optional[bool] = None
+
+
+# --- Reports ---
+
+class SummaryResponse(BaseModel):
+    currency: str
+    total_income: Decimal
+    total_expense: Decimal
+    net_cashflow: Decimal
+
+
+class CategoryBreakdownItem(BaseModel):
+    category: CategoryResponse
+    total: Decimal
+    percentage: float
+
+
+class TrendGroup(BaseModel):
+    label: str
+    income: Decimal
+    expense: Decimal
+    net: Decimal
+
+
+class TrendResponse(BaseModel):
+    currency: str
+    groups: list[TrendGroup]
+
+
+# --- Exchange Rate ---
+
+class RateResponse(BaseModel):
+    from_currency: str
+    to_currency: str
+    rate: Decimal
+    cached: bool
+
+===== ./app/seeds/default_categories.py =====
+"""
+Run once to populate the default_categories table.
+Usage: python -m app.seeds.default_categories
+"""
+import asyncio
+
+from app.db.session import async_session_factory
+from app.models import DefaultCategory
+
+DEFAULT_CATEGORIES = [
+    # Income
+    {"name": "Salary", "type": "income", "icon": "💼"},
+    {"name": "Freelance", "type": "income", "icon": "💻"},
+    {"name": "Business", "type": "income", "icon": "🏢"},
+    {"name": "Investment", "type": "income", "icon": "📈"},
+    {"name": "Gift", "type": "income", "icon": "🎁"},
+    {"name": "Other income", "type": "income", "icon": "➕"},
+    # Expense
+    {"name": "Food & dining", "type": "expense", "icon": "🍽️"},
+    {"name": "Transport", "type": "expense", "icon": "🚗"},
+    {"name": "Utilities", "type": "expense", "icon": "💡"},
+    {"name": "Rent", "type": "expense", "icon": "🏠"},
+    {"name": "Health", "type": "expense", "icon": "🏥"},
+    {"name": "Education", "type": "expense", "icon": "📚"},
+    {"name": "Entertainment", "type": "expense", "icon": "🎬"},
+    {"name": "Shopping", "type": "expense", "icon": "🛍️"},
+    {"name": "Savings", "type": "expense", "icon": "🏦"},
+    {"name": "Data & airtime", "type": "expense", "icon": "📱"},
+    {"name": "Personal care", "type": "expense", "icon": "💆"},
+    {"name": "Other expense", "type": "expense", "icon": "➖"},
+]
+
+
+async def seed():
+    async with async_session_factory() as session:
+        for item in DEFAULT_CATEGORIES:
+            session.add(DefaultCategory(**item))
+        await session.commit()
+    print(f"Seeded {len(DEFAULT_CATEGORIES)} default categories.")
+
+
+if __name__ == "__main__":
+    asyncio.run(seed())
+
+===== ./app/seeds/__init__.py =====
+
+===== ./app/services/auth.py =====
+import uuid
+
+import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.exceptions import ConflictError, UnauthorizedError
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    decode_token,
+    hash_password,
+    verify_password,
+)
+from app.repositories.category import CategoryRepository
+from app.repositories.user import UserRepository
+from app.schemas import TokenResponse
+
+
+class AuthService:
+    def __init__(self, db: AsyncSession, redis: aioredis.Redis):
+        self.db = db
+        self.redis = redis
+        self.user_repo = UserRepository(db)
+        self.category_repo = CategoryRepository(db)
+
+    async def register(self, email: str, password: str, base_currency: str) -> tuple[dict, TokenResponse]:
+        existing = await self.user_repo.get_by_email(email)
+        if existing:
+            raise ConflictError("Email already registered")
+
+        user = await self.user_repo.create({
+            "email": email,
+            "hashed_password": hash_password(password),
+            "base_currency": base_currency,
+            "role": "user",
+        })
+
+        await self.category_repo.seed_defaults_for_user(user.id)
+        tokens = await self._issue_tokens(user.id)
+        return user, tokens
+
+    async def login(self, email: str, password: str) -> tuple[dict, TokenResponse]:
+        user = await self.user_repo.get_by_email(email)
+        if not user or not verify_password(password, user.hashed_password):
+            raise UnauthorizedError("Invalid credentials")
+
+        if user.is_deleted:
+            raise UnauthorizedError("Account has been deactivated")
+
+        tokens = await self._issue_tokens(user.id)
+        return user, tokens
+
+    async def refresh(self, refresh_token: str) -> TokenResponse:
+        payload = decode_token(refresh_token)
+        if not payload or payload.get("type") != "refresh":
+            raise UnauthorizedError("Invalid refresh token")
+
+        user_id = payload.get("sub")
+        stored = await self.redis.get(f"refresh:{user_id}")
+        if not stored or stored != refresh_token:
+            raise UnauthorizedError("Refresh token has been revoked")
+
+        return TokenResponse(
+            access_token=create_access_token(user_id),
+            refresh_token=refresh_token,
+        )
+
+    async def logout(self, user_id: uuid.UUID) -> None:
+        await self.redis.delete(f"refresh:{str(user_id)}")
+
+    async def _issue_tokens(self, user_id: uuid.UUID) -> TokenResponse:
+        access = create_access_token(str(user_id))
+        refresh = create_refresh_token(str(user_id))
+        await self.redis.setex(
+            f"refresh:{str(user_id)}",
+            settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+            refresh,
+        )
+        return TokenResponse(access_token=access, refresh_token=refresh)
+
+===== ./app/services/budget.py =====
+import uuid
+from datetime import date
+from decimal import Decimal
+
+from dateutil.relativedelta import relativedelta
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.models import Budget, User
+from app.repositories.budget import BudgetRepository
+from app.repositories.transaction import TransactionRepository
+from app.schemas import UtilisationSchema
+
+
+def compute_period_bounds(start_date: date, period: str) -> tuple[date, date]:
+    today = date.today()
+
+    if period == "weekly":
+        delta = relativedelta(weeks=1)
+    elif period == "monthly":
+        delta = relativedelta(months=1)
+    elif period == "quarterly":
+        delta = relativedelta(months=3)
+    else:
+        delta = relativedelta(months=1)
+
+    period_start = start_date
+    while period_start + delta <= today:
+        period_start += delta
+
+    return period_start, period_start + delta - relativedelta(days=1)
+
+
+class BudgetService:
+    def __init__(self, db: AsyncSession):
+        self.repo = BudgetRepository(db)
+        self.tx_repo = TransactionRepository(db)
+
+    async def list(self, user: User) -> list[Budget]:
+        budgets = await self.repo.get_all_for_user(user.id)
+        return [await self._attach_utilisation(b, user.id) for b in budgets]
+
+    async def get(self, user: User, id: uuid.UUID) -> Budget:
+        budget = await self.repo.get_by_id_for_user(id, user.id)
+        if not budget:
+            raise NotFoundError("Budget not found")
+        return await self._attach_utilisation(budget, user.id)
+
+    async def create(self, user: User, data: dict):
+        return await self.repo.create({"user_id": user.id, **data})
+
+    async def update(self, user: User, id: uuid.UUID, data: dict):
+        budget = await self.repo.get_by_id_for_user(id, user.id)
+        if not budget:
+            raise NotFoundError("Budget not found")
+        return await self.repo.update(id, {k: v for k, v in data.items() if v is not None})
+
+    async def delete(self, user: User, id: uuid.UUID) -> None:
+        budget = await self.repo.get_by_id_for_user(id, user.id)
+        if not budget:
+            raise NotFoundError("Budget not found")
+        await self.repo.soft_delete(id)
+
+    async def _attach_utilisation(self, budget: Budget, user_id: uuid.UUID) -> Budget:
+        period_start, period_end = compute_period_bounds(budget.start_date, budget.period)
+        spent = await self.tx_repo.get_total_by_category_in_period(
+            user_id, budget.category_id, period_start, period_end
+        )
+        remaining = max(budget.amount - spent, Decimal("0"))
+        percentage = float((spent / budget.amount * 100).quantize(Decimal("0.1"))) if budget.amount else 0.0
+
+        # Attach utilisation as a non-mapped attribute so BudgetResponse can read it
+        budget.utilisation = UtilisationSchema(
+            spent=spent,
+            remaining=remaining,
+            percentage=percentage,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        return budget
+
+===== ./app/services/category.py =====
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from app.models import User
+from app.repositories.category import CategoryRepository
+
+
+class CategoryService:
+    def __init__(self, db: AsyncSession):
+        self.repo = CategoryRepository(db)
+
+    async def list(self, user: User, type: str | None = None):
+        return await self.repo.get_all_for_user(user.id, type=type)
+
+    async def create(self, user: User, name: str, type: str, icon: str | None):
+        return await self.repo.create({
+            "user_id": user.id,
+            "name": name,
+            "type": type,
+            "icon": icon,
+            "is_default": False,
+        })
+
+    async def update(self, user: User, id: uuid.UUID, data: dict):
+        category = await self.repo.get_by_id(id)
+        if not category:
+            raise NotFoundError("Category not found")
+        if category.user_id != user.id:
+            raise ForbiddenError()
+        return await self.repo.update(id, {k: v for k, v in data.items() if v is not None})
+
+    async def delete(self, user: User, id: uuid.UUID) -> None:
+        category = await self.repo.get_by_id(id)
+        if not category:
+            raise NotFoundError("Category not found")
+        if category.user_id != user.id:
+            raise ForbiddenError()
+        if await self.repo.has_linked_transactions(id):
+            raise ConflictError("Category has linked transactions — reassign them before deleting")
+        if await self.repo.has_active_budget(id):
+            raise ConflictError("Category has an active budget — delete it before deleting this category")
+        await self.repo.soft_delete(id)
+
+===== ./app/services/__init__.py =====
+
+===== ./app/services/rate.py =====
+import uuid
+from decimal import Decimal
+
+import httpx
+import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.exceptions import AppException
+from app.repositories.exchange_rate_snapshot import ExchangeRateSnapshotRepository
+
+
+class RateService:
+    def __init__(self, db: AsyncSession, redis: aioredis.Redis):
+        self.db = db
+        self.redis = redis
+        self.snapshot_repo = ExchangeRateSnapshotRepository(db)
+
+    async def get_rate(self, from_currency: str, to_currency: str, user_id: uuid.UUID) -> tuple[Decimal, bool]:
+        if from_currency == to_currency:
+            return Decimal("1.0"), True
+
+        cache_key = f"rate:{from_currency}:{to_currency}"
+        cached = await self.redis.get(cache_key)
+
+        if cached:
+            return Decimal(cached), True
+
+        rate = await self._fetch_from_provider(from_currency, to_currency)
+        await self.redis.setex(cache_key, settings.EXCHANGE_RATE_CACHE_TTL, str(rate))
+        await self.snapshot_repo.create(user_id, from_currency, to_currency, rate)
+        return rate, False
+
+    async def _fetch_from_provider(self, from_currency: str, to_currency: str) -> Decimal:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{settings.EXCHANGE_RATE_API_URL}/latest.json",
+                params={"app_id": settings.EXCHANGE_RATE_API_KEY, "base": from_currency, "symbols": to_currency},
+            )
+            if response.status_code != 200:
+                raise AppException(502, "Exchange rate service unavailable")
+
+            data = response.json()
+            rate = data.get("rates", {}).get(to_currency)
+            if not rate:
+                raise AppException(400, f"Unsupported currency pair: {from_currency}/{to_currency}")
+
+            return Decimal(str(rate))
+
+===== ./app/services/report.py =====
+from datetime import date
+from decimal import Decimal
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.models import Category, Transaction, User
+from app.schemas import CategoryBreakdownItem, CategoryResponse, SummaryResponse, TrendGroup, TrendResponse
+
+
+class ReportService:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def summary(self, user: User, start_date: date, end_date: date) -> SummaryResponse:
+        result = await self.db.execute(
+            select(
+                Transaction.type,
+                func.coalesce(func.sum(Transaction.amount_in_base), 0).label("total"),
+            )
+            .where(
+                Transaction.user_id == user.id,
+                Transaction.is_deleted == False,
+                Transaction.transaction_date >= start_date,
+                Transaction.transaction_date <= end_date,
+            )
+            .group_by(Transaction.type)
+        )
+        rows = result.all()
+        totals = {row.type: Decimal(str(row.total)) for row in rows}
+        income = totals.get("income", Decimal("0"))
+        expense = totals.get("expense", Decimal("0"))
+        return SummaryResponse(
+            currency=user.base_currency,
+            total_income=income,
+            total_expense=expense,
+            net_cashflow=income - expense,
+        )
+
+    async def by_category(self, user: User, start_date: date, end_date: date, type: str = "expense") -> list[CategoryBreakdownItem]:
+        result = await self.db.execute(
+            select(
+                Transaction.category_id,
+                func.coalesce(func.sum(Transaction.amount_in_base), 0).label("total"),
+            )
+            .where(
+                Transaction.user_id == user.id,
+                Transaction.is_deleted == False,
+                Transaction.type == type,
+                Transaction.transaction_date >= start_date,
+                Transaction.transaction_date <= end_date,
+            )
+            .group_by(Transaction.category_id)
+            .order_by(func.sum(Transaction.amount_in_base).desc())
+        )
+        rows = result.all()
+        if not rows:
+            return []
+
+        grand_total = sum(Decimal(str(r.total)) for r in rows)
+        category_ids = [r.category_id for r in rows]
+
+        cats_result = await self.db.execute(
+            select(Category).where(Category.id.in_(category_ids))
+        )
+        cats = {c.id: c for c in cats_result.scalars().all()}
+
+        return [
+            CategoryBreakdownItem(
+                category=CategoryResponse.model_validate(cats[row.category_id]),
+                total=Decimal(str(row.total)),
+                percentage=float((Decimal(str(row.total)) / grand_total * 100).quantize(Decimal("0.1"))) if grand_total else 0.0,
+            )
+            for row in rows if row.category_id in cats
+        ]
+
+    async def trend(self, user: User, start_date: date, end_date: date, group_by: str = "month") -> TrendResponse:
+        if group_by == "day":
+            trunc = func.date_trunc("day", Transaction.transaction_date)
+            label_format = "DD Mon YYYY"
+        elif group_by == "week":
+            trunc = func.date_trunc("week", Transaction.transaction_date)
+            label_format = "DD Mon YYYY"
+        else:
+            trunc = func.date_trunc("month", Transaction.transaction_date)
+            label_format = "Mon YYYY"
+
+        result = await self.db.execute(
+            select(
+                trunc.label("period"),
+                Transaction.type,
+                func.coalesce(func.sum(Transaction.amount_in_base), 0).label("total"),
+            )
+            .where(
+                Transaction.user_id == user.id,
+                Transaction.is_deleted == False,
+                Transaction.transaction_date >= start_date,
+                Transaction.transaction_date <= end_date,
+            )
+            .group_by("period", Transaction.type)
+            .order_by("period")
+        )
+        rows = result.all()
+
+        periods: dict[str, dict] = {}
+        for row in rows:
+            label = row.period.strftime("%b %Y" if group_by == "month" else "%d %b %Y")
+            if label not in periods:
+                periods[label] = {"income": Decimal("0"), "expense": Decimal("0")}
+            periods[label][row.type] = Decimal(str(row.total))
+
+        groups = [
+            TrendGroup(
+                label=label,
+                income=vals["income"],
+                expense=vals["expense"],
+                net=vals["income"] - vals["expense"],
+            )
+            for label, vals in periods.items()
+        ]
+        return TrendResponse(currency=user.base_currency, groups=groups)
+
+===== ./app/services/transaction.py =====
+import uuid
+from datetime import date
+from decimal import Decimal
+
+import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.models import User
+from app.repositories.transaction import TransactionRepository
+from app.services.rate import RateService
+
+
+class TransactionService:
+    def __init__(self, db: AsyncSession, redis: aioredis.Redis):
+        self.db = db
+        self.repo = TransactionRepository(db)
+        self.rate_service = RateService(db, redis)
+
+    async def list(self, user: User, **filters) -> tuple[list, int]:
+        return await self.repo.get_paginated(user_id=user.id, **filters)
+
+    async def create(
+        self,
+        user: User,
+        type: str,
+        amount: Decimal,
+        currency: str,
+        category_id: uuid.UUID,
+        description: str | None,
+        transaction_date: date,
+        source: str = "manual",
+    ):
+        rate, _ = await self.rate_service.get_rate(currency, user.base_currency, user.id)
+        amount_in_base = (amount * rate).quantize(Decimal("0.01"))
+
+        return await self.repo.create({
+            "user_id": user.id,
+            "type": type,
+            "amount": amount,
+            "currency": currency,
+            "exchange_rate_to_base": rate,
+            "amount_in_base": amount_in_base,
+            "category_id": category_id,
+            "description": description,
+            "transaction_date": transaction_date,
+            "source": source,
+        })
+
+    async def update(self, user: User, id: uuid.UUID, data: dict):
+        tx = await self.repo.get_by_id(id)
+        if not tx:
+            raise NotFoundError("Transaction not found")
+        if tx.user_id != user.id:
+            raise ForbiddenError()
+        return await self.repo.update(id, {k: v for k, v in data.items() if v is not None})
+
+    async def delete(self, user: User, id: uuid.UUID) -> None:
+        tx = await self.repo.get_by_id(id)
+        if not tx:
+            raise NotFoundError("Transaction not found")
+        if tx.user_id != user.id:
+            raise ForbiddenError()
+        await self.repo.soft_delete(id)
+
+===== ./app/services/user.py =====
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import ConflictError, UnauthorizedError
+from app.core.security import hash_password, verify_password
+from app.models import User
+from app.repositories.user import UserRepository
+
+
+class UserService:
+    def __init__(self, db: AsyncSession):
+        self.repo = UserRepository(db)
+
+    async def update(self, user: User, data: dict) -> User:
+        updates = {k: v for k, v in data.items() if v is not None}
+
+        if "email" in updates and updates["email"] != user.email:
+            existing = await self.repo.get_by_email(updates["email"])
+            if existing:
+                raise ConflictError("Email already in use")
+
+        return await self.repo.update(user.id, updates)
+
+    async def change_password(self, user: User, current_password: str, new_password: str) -> None:
+        if not verify_password(current_password, user.hashed_password):
+            raise UnauthorizedError("Current password is incorrect")
+        await self.repo.update(user.id, {"hashed_password": hash_password(new_password)})
+
+    async def delete(self, user: User) -> None:
+        await self.repo.soft_delete(user.id)
+
+===== ./tests/conftest.py =====
+import asyncio
+import uuid
+from typing import AsyncGenerator
+
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.core.dependencies import get_db, get_redis
+from app.db.base import Base
+from app.main import app
+from app.models import *  # noqa
+
+TEST_DATABASE_URL = "postgresql+asyncpg://postgres:password@localhost:5432/pocketledger_test"
+
+engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+test_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def setup_db():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest_asyncio.fixture
+async def db() -> AsyncGenerator[AsyncSession, None]:
+    async with test_session_factory() as session:
+        yield session
+
+
+@pytest_asyncio.fixture
+async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    class FakeRedis:
+        store = {}
+
+        async def get(self, key): return self.store.get(key)
+        async def setex(self, key, ttl, value): self.store[key] = value
+        async def delete(self, key): self.store.pop(key, None)
+
+    fake_redis = FakeRedis()
+    app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_redis] = lambda: fake_redis
+
+    async with AsyncClient(app=app, base_url="http://test") as c:
+        yield c
+
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def auth_client(client: AsyncClient) -> AsyncClient:
+    await client.post("/api/v1/auth/register", json={
+        "email": f"test_{uuid.uuid4().hex[:8]}@example.com",
+        "password": "testpassword123",
+        "base_currency": "NGN",
+    })
+    response = await client.post("/api/v1/auth/login", json={
+        "email": "test@example.com",
+        "password": "testpassword123",
+    })
+    token = response.json()["data"]["access_token"]
+    client.headers["Authorization"] = f"Bearer {token}"
+    return client
+
+===== ./tests/__init__.py =====
+
+===== ./tests/test_auth.py =====
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_register(client: AsyncClient):
+    response = await client.post("/api/v1/auth/register", json={
+        "email": "newuser@example.com",
+        "password": "password123",
+        "base_currency": "NGN",
+    })
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert "access_token" in data
+    assert data["user"]["email"] == "newuser@example.com"
+
+
+@pytest.mark.asyncio
+async def test_register_duplicate_email(client: AsyncClient):
+    payload = {"email": "dup@example.com", "password": "pass123", "base_currency": "NGN"}
+    await client.post("/api/v1/auth/register", json=payload)
+    response = await client.post("/api/v1/auth/register", json=payload)
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_login_invalid_credentials(client: AsyncClient):
+    response = await client.post("/api/v1/auth/login", json={
+        "email": "nobody@example.com",
+        "password": "wrongpassword",
+    })
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_protected_route_without_token(client: AsyncClient):
+    response = await client.get("/api/v1/users/me")
+    assert response.status_code == 403
+
