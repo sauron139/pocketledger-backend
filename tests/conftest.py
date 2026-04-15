@@ -61,14 +61,16 @@ async def client(db: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
 
 @pytest_asyncio.fixture
 async def auth_client(client: AsyncClient) -> AsyncClient:
+    email = f"test_{uuid.uuid4().hex[:8]}@example.com"
+    password = "testpassword123"
     await client.post("/api/v1/auth/register", json={
-        "email": f"test_{uuid.uuid4().hex[:8]}@example.com",
-        "password": "testpassword123",
+        "email": email,
+        "password": password,
         "base_currency": "NGN",
     })
     response = await client.post("/api/v1/auth/login", json={
-        "email": "test@example.com",
-        "password": "testpassword123",
+        "email": email,
+        "password": password,
     })
     token = response.json()["data"]["access_token"]
     client.headers["Authorization"] = f"Bearer {token}"

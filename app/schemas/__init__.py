@@ -125,6 +125,37 @@ class UpdateTransactionRequest(BaseModel):
     transaction_date: Optional[date] = None
 
 
+# --- Recurring Transaction ---
+
+class RecurringTransactionResponse(BaseModel):
+    id: uuid.UUID
+    type: str
+    amount: Decimal
+    currency: str
+    description: Optional[str]
+    frequency: str
+    next_run_date: date
+    end_date: Optional[date] = None
+    is_active: bool
+    category: CategoryResponse
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CreateRecurringTransactionRequest(BaseModel):
+    category_id: uuid.UUID
+    type: str
+    amount: Decimal
+    currency: str
+    description: Optional[str] = None
+    frequency: str
+    next_run_date: date
+    end_date: Optional[date] = None
+    is_active: bool = True
+
+
 # --- Budget ---
 
 class UtilisationSchema(BaseModel):
@@ -198,3 +229,24 @@ class RateResponse(BaseModel):
     to_currency: str
     rate: Decimal
     cached: bool
+
+class PeriodBounds(BaseModel):
+    start: date
+    end: date
+
+
+class PeriodDelta(BaseModel):
+    current: Decimal
+    previous: Decimal
+    absolute: Decimal
+    percentage: float | None
+
+
+class ComparisonResponse(BaseModel):
+    currency: str
+    period: str
+    current_period: PeriodBounds
+    previous_period: PeriodBounds
+    income: PeriodDelta
+    expense: PeriodDelta
+    net: PeriodDelta

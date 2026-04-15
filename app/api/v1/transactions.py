@@ -3,10 +3,11 @@ from datetime import date
 from typing import Optional
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db, get_redis
+from app.core.exceptions import ForbiddenError, NotFoundError
 from app.models import User
 from app.schemas import (
     APIResponse,
@@ -59,6 +60,7 @@ async def list_transactions(
 @router.post("/")
 async def create_transaction(
     body: CreateTransactionRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: aioredis.Redis = Depends(get_redis),
@@ -72,6 +74,7 @@ async def create_transaction(
         category_id=body.category_id,
         description=body.description,
         transaction_date=body.transaction_date,
+        background_tasks=background_tasks,
     )
     return APIResponse(data=TransactionResponse.model_validate(tx))
 
@@ -84,12 +87,7 @@ async def get_transaction(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     service = TransactionService(db, redis)
-    tx = await service.repo.get_by_id(id)
-    from app.core.exceptions import ForbiddenError, NotFoundError
-    if not tx:
-        raise NotFoundError("Transaction not found")
-    if tx.user_id != current_user.id:
-        raise ForbiddenError()
+    tx = await service.get(current_user, id)
     return APIResponse(data=TransactionResponse.model_validate(tx))
 
 

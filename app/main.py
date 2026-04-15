@@ -1,14 +1,27 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import router
 from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
+from app.scheduler import create_scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = create_scheduler()
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
 
 app = FastAPI(
     title="PocketLedger API",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

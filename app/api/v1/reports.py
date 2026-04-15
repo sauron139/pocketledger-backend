@@ -64,3 +64,13 @@ async def budget_status(
     )
     from app.schemas import BudgetResponse
     return APIResponse(data=[BudgetResponse.model_validate(b) for b in budgets_sorted])
+
+@router.get("/comparison")
+async def comparison(
+    period: str = Query("monthly"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ReportService(db)
+    result = await service.comparison(current_user, period)
+    return APIResponse(data=result)

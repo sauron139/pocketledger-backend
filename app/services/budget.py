@@ -5,30 +5,13 @@ from decimal import Decimal
 from dateutil.relativedelta import relativedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.period import compute_period_bounds
 from app.core.exceptions import ForbiddenError, NotFoundError
 from app.models import Budget, User
 from app.repositories.budget import BudgetRepository
 from app.repositories.transaction import TransactionRepository
 from app.schemas import UtilisationSchema
 
-
-def compute_period_bounds(start_date: date, period: str) -> tuple[date, date]:
-    today = date.today()
-
-    if period == "weekly":
-        delta = relativedelta(weeks=1)
-    elif period == "monthly":
-        delta = relativedelta(months=1)
-    elif period == "quarterly":
-        delta = relativedelta(months=3)
-    else:
-        delta = relativedelta(months=1)
-
-    period_start = start_date
-    while period_start + delta <= today:
-        period_start += delta
-
-    return period_start, period_start + delta - relativedelta(days=1)
 
 
 class BudgetService:
