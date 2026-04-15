@@ -9,6 +9,12 @@ from app.scheduler import create_scheduler
 
 from app.middleware.rate_limit import RateLimitMiddleware
 
+from app.core.logging import setup_logging
+from app.core.config import settings
+from app.middleware.logging import LoggingMiddleware
+
+setup_logging(environment=settings.ENVIRONMENT)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,6 +43,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(LoggingMiddleware)
 app.add_middleware(RateLimitMiddleware, requests_per_minute=60)
 
 app.add_exception_handler(AppException, app_exception_handler)

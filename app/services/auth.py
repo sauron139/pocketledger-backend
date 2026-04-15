@@ -1,5 +1,6 @@
 import uuid
 
+from pocketledger.backend.app.services import user
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +17,9 @@ from app.repositories.category import CategoryRepository
 from app.repositories.user import UserRepository
 from app.schemas import TokenResponse
 
+from app.core.logging import get_logger
+
+logger = get_logger("auth")
 
 class AuthService:
     def __init__(self, db: AsyncSession, redis: aioredis.Redis):
@@ -38,6 +42,7 @@ class AuthService:
 
         await self.category_repo.seed_defaults_for_user(user.id)
         tokens = await self._issue_tokens(user.id)
+        logger.info("auth.registered", user_id=str(user.id), email=email)
         return user, tokens
 
     async def login(self, email: str, password: str) -> tuple[dict, TokenResponse]:
@@ -47,8 +52,8 @@ class AuthService:
 
         if user.is_deleted:
             raise UnauthorizedError("Account has been deactivated")
-
         tokens = await self._issue_tokens(user.id)
+        logger.info("auth.login_success", user_id=str(user.id))
         return user, tokens
 
     async def refresh(self, refresh_token: str) -> TokenResponse:

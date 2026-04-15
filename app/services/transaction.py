@@ -13,6 +13,9 @@ from app.repositories.transaction import TransactionRepository
 from app.services.notification import NotificationService
 from app.services.rate import RateService
 
+from app.core.logging import get_logger
+
+logger = get_logger("transaction")
 
 class TransactionService:
     def __init__(self, db: AsyncSession, redis: aioredis.Redis):
@@ -62,6 +65,17 @@ class TransactionService:
             "recurring_transaction_id": recurring_transaction_id,
         })
 
+        logger.info(
+            "transaction.created",
+            transaction_id=str(tx.id),
+            user_id=str(user.id),
+            type=type,
+            amount=str(amount),
+            currency=currency,
+            amount_in_base=str(amount_in_base),
+            source=source,
+        )
+
         if type == "expense" and background_tasks is not None:
             background_tasks.add_task(
                 self._check_budget_thresholds, user.id, category_id
@@ -97,6 +111,13 @@ class TransactionService:
 
         if audit_entries:
             await self.audit_repo.bulk_create(audit_entries)
+
+            logger.info(
+                "transaction.updated",
+                transaction_id=str(id),
+                user_id=str(user.id),
+                fields_changed=list(changes.keys()),
+            )
 
         return await self.repo.update(id, changes)
 

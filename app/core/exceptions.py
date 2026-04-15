@@ -1,7 +1,22 @@
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+import structlog
 
+logger = structlog.get_logger("exceptions")
+
+
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.exception(
+        "unhandled.exception",
+        exc_type=type(exc).__name__,
+        path=request.url.path,
+        method=request.method,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": "An unexpected error occurred"},
+    )
 class AppException(Exception):
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code

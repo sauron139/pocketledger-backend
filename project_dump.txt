@@ -183,6 +183,74 @@ async def delete_category(
     await service.delete(current_user, id)
     return APIResponse(data=None, message="Category deleted")
 
+===== ./app/api/v1/exports.py =====
+from datetime import date
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.dependencies import get_current_user, get_db
+from app.core.logging import get_logger
+from app.models import User
+from app.services.export import ExportService
+
+router = APIRouter(prefix="/exports", tags=["exports"])
+logger = get_logger("export")
+
+
+@router.get("/transactions")
+async def export_transactions(
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    type: Optional[str] = Query(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = ExportService(db)
+    buffer = await service.transactions_csv(
+        current_user,
+        start_date=start_date,
+        end_date=end_date,
+        type=type,
+    )
+
+    filename = _build_filename(current_user.base_currency, start_date, end_date, type)
+
+    logger.info(
+        "export.transactions",
+        user_id=str(current_user.id),
+        start_date=str(start_date),
+        end_date=str(end_date),
+        type=type,
+    )
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Export-Limit": "10000",
+        },
+    )
+
+
+def _build_filename(
+    currency: str,
+    start_date: date | None,
+    end_date: date | None,
+    type: str | None,
+) -> str:
+    parts = ["pocketledger", "transactions"]
+    if type:
+        parts.append(type)
+    if start_date:
+        parts.append(start_date.isoformat())
+    if end_date:
+        parts.append(end_date.isoformat())
+    parts.append(currency)
+    return "_".join(parts) + ".csv"
 ===== ./app/api/v1/__init__.py =====
 
 ===== ./app/api/v1/notifications.py =====
@@ -395,7 +463,7 @@ async def comparison(
 ===== ./app/api/v1/router.py =====
 from fastapi import APIRouter
 
-from app.api.v1 import auth, budgets, categories, notifications, rates, recurring, reports, transactions, users
+from app.api.v1 import auth, budgets, categories, exports, notifications, rates, recurring, reports, transactions, users
 
 
 
@@ -404,6 +472,7 @@ router = APIRouter(prefix="/api/v1")
 router.include_router(auth.router)
 router.include_router(users.router)
 router.include_router(categories.router)
+router.include_router(exports.router)
 router.include_router(transactions.router)
 router.include_router(budgets.router)
 router.include_router(reports.router)
@@ -416,7 +485,7 @@ from datetime import date
 from typing import Optional
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db, get_redis
@@ -430,6 +499,8 @@ from app.schemas import (
     UpdateTransactionRequest,
 )
 from app.services.transaction import TransactionService
+from app.core.idempotency import idempotency_guard, store_idempotent_response
+
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -470,8 +541,9 @@ async def list_transactions(
     )
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(idempotency_guard)])
 async def create_transaction(
+    request: Request,
     body: CreateTransactionRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
@@ -489,7 +561,9 @@ async def create_transaction(
         transaction_date=body.transaction_date,
         background_tasks=background_tasks,
     )
-    return APIResponse(data=TransactionResponse.model_validate(tx))
+    response_data = APIResponse(data=TransactionResponse.model_validate(tx)).model_dump(mode="json")
+    await store_idempotent_response(request, response_data)
+    return response_data
 
 
 @router.get("/{id}")
@@ -654,7 +728,22 @@ async def get_current_user(
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+import structlog
 
+logger = structlog.get_logger("exceptions")
+
+
+async def generic_exception_handler(request: Request, exc: Exception):
+    logger.exception(
+        "unhandled.exception",
+        exc_type=type(exc).__name__,
+        path=request.url.path,
+        method=request.method,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": "An unexpected error occurred"},
+    )
 class AppException(Exception):
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code
@@ -699,8 +788,106 @@ async def generic_exception_handler(request: Request, exc: Exception):
         content={"status": "error", "message": "An unexpected error occurred"},
     )
 
+===== ./app/core/idempotency.py =====
+import json
+import uuid
+
+import redis.asyncio as aioredis
+from fastapi import Depends, Header, Request
+from fastapi.responses import JSONResponse
+from typing import Optional
+
+from app.core.dependencies import get_current_user, get_redis
+from app.core.exceptions import BadRequestError
+from app.models import User
+
+IDEMPOTENCY_TTL = 86400
+
+
+async def idempotency_guard(
+    request: Request,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    current_user: User = Depends(get_current_user),
+    redis: aioredis.Redis = Depends(get_redis),
+):
+    if idempotency_key is None:
+        raise BadRequestError("Idempotency-Key header is required")
+
+    try:
+        uuid.UUID(idempotency_key)
+    except ValueError:
+        raise BadRequestError("Idempotency-Key must be a valid UUID")
+
+    redis_key = f"idempotency:{current_user.id}:{idempotency_key}"
+    cached = await redis.get(redis_key)
+
+    if cached:
+        return JSONResponse(
+            status_code=200,
+            content=json.loads(cached),
+            headers={"X-Idempotent-Replayed": "true"},
+        )
+
+    request.state.idempotency_key = redis_key
+    request.state.redis = redis
+
+async def store_idempotent_response(request: Request, response_data: dict) -> None:
+    redis_key = getattr(request.state, "idempotency_key", None)
+    redis = getattr(request.state, "redis", None)
+
+    if redis_key and redis:
+        await redis.setex(redis_key, IDEMPOTENCY_TTL, json.dumps(response_data))
 ===== ./app/core/__init__.py =====
 
+===== ./app/core/logging.py =====
+import logging
+import sys
+
+import structlog
+
+
+def setup_logging(environment: str = "development") -> None:
+    shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+    ]
+
+    if environment == "production":
+        renderer = structlog.processors.JSONRenderer()
+    else:
+        renderer = structlog.dev.ConsoleRenderer()
+
+    structlog.configure(
+        processors=shared_processors + [
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+    formatter = structlog.stdlib.ProcessorFormatter(
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            renderer,
+        ],
+        foreign_pre_chain=shared_processors,
+    )
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+
+
+def get_logger(name: str):
+    return structlog.get_logger(name)
 ===== ./app/core/security.py =====
 from datetime import datetime, timedelta
 from typing import Optional
@@ -854,6 +1041,66 @@ import sqlalchemy as sa
 
 revision: str = '1dbed29f2b0a'
 down_revision: Union[str, None] = 'f7c3dd8221ad'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+===== ./app/db/migrations/versions/49c3bc4ba719_add_composite_indexes_recurring_.py =====
+"""add composite indexes, recurring transactions, notifications, audit logs
+
+Revision ID: 49c3bc4ba719
+Revises: 1dbed29f2b0a
+Create Date: 2026-04-15 02:07:19.303323
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision: str = '49c3bc4ba719'
+down_revision: Union[str, None] = '1dbed29f2b0a'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    # ### commands auto generated by Alembic - please adjust! ###
+    pass
+    # ### end Alembic commands ###
+===== ./app/db/migrations/versions/cc30676043db_add_composite_indexes_recurring_.py =====
+"""add composite indexes, recurring transactions, notifications, audit logs
+
+Revision ID: cc30676043db
+Revises: 49c3bc4ba719
+Create Date: 2026-04-15 02:08:49.522974
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision: str = 'cc30676043db'
+down_revision: Union[str, None] = '49c3bc4ba719'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -1185,6 +1432,14 @@ from app.api.v1.router import router
 from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
 from app.scheduler import create_scheduler
 
+from app.middleware.rate_limit import RateLimitMiddleware
+
+from app.core.logging import setup_logging
+from app.core.config import settings
+from app.middleware.logging import LoggingMiddleware
+
+setup_logging(environment=settings.ENVIRONMENT)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1213,6 +1468,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(RateLimitMiddleware, requests_per_minute=60)
+
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
 
@@ -1222,6 +1480,101 @@ app.include_router(router)
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+===== ./app/middleware/logging.py =====
+import time
+import uuid
+
+import structlog
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+
+logger = structlog.get_logger("http")
+
+
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        request_id = str(uuid.uuid4())
+        start_time = time.perf_counter()
+
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+        )
+
+        response = await call_next(request)
+
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+
+        structlog.contextvars.bind_contextvars(
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+        )
+
+        if response.status_code >= 500:
+            logger.error("request.failed")
+        elif response.status_code >= 400:
+            logger.warning("request.client_error")
+        else:
+            logger.info("request.completed")
+
+        response.headers["X-Request-ID"] = request_id
+        return response
+===== ./app/middleware/rate_limit.py =====
+import time
+import redis.asyncio as aioredis
+from fastapi import Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+
+from app.core.config import settings
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, requests_per_minute: int = 60):
+        super().__init__(app)
+        self.requests_per_minute = requests_per_minute
+        self.window = 60
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        if request.url.path in ("/health", "/docs", "/redoc", "/openapi.json"):
+            return await call_next(request)
+
+        redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        identity = self._get_identity(request)
+        key = f"rate:{identity}:{request.url.path}"
+
+        now = time.time()
+        window_start = now - self.window
+
+        async with redis.pipeline() as pipe:
+            await pipe.zremrangebyscore(key, 0, window_start)
+            await pipe.zcard(key)
+            await pipe.zadd(key, {str(now): now})
+            await pipe.expire(key, self.window)
+            results = await pipe.execute()
+
+        request_count = results[1]
+
+        if request_count >= self.requests_per_minute:
+            return JSONResponse(
+                status_code=429,
+                content={"status": "error", "message": "Too many requests"},
+                headers={"Retry-After": str(self.window)},
+            )
+
+        return await call_next(request)
+
+    def _get_identity(self, request: Request) -> str:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth.split(" ")[1]
+            return f"token:{token[:16]}"
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return f"ip:{forwarded.split(',')[0].strip()}"
+        return f"ip:{request.client.host}"
 ===== ./app/models/__init__.py =====
 import uuid
 from datetime import date, datetime
@@ -1276,7 +1629,6 @@ class Category(BaseModel):
     seeded_from_default: Mapped["DefaultCategory | None"] = relationship(back_populates="seeded_categories")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")
     budgets: Mapped[list["Budget"]] = relationship(back_populates="category")
-
 
 class Transaction(BaseModel):
     __tablename__ = "transactions"
@@ -1994,37 +2346,6 @@ class UpdateTransactionRequest(BaseModel):
     transaction_date: Optional[date] = None
 
 
-# --- Recurring Transaction ---
-
-class RecurringTransactionResponse(BaseModel):
-    id: uuid.UUID
-    type: str
-    amount: Decimal
-    currency: str
-    description: Optional[str]
-    frequency: str
-    next_run_date: date
-    end_date: Optional[date] = None
-    is_active: bool
-    category: CategoryResponse
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class CreateRecurringTransactionRequest(BaseModel):
-    category_id: uuid.UUID
-    type: str
-    amount: Decimal
-    currency: str
-    description: Optional[str] = None
-    frequency: str
-    next_run_date: date
-    end_date: Optional[date] = None
-    is_active: bool = True
-
-
 # --- Budget ---
 
 class UtilisationSchema(BaseModel):
@@ -2119,6 +2440,65 @@ class ComparisonResponse(BaseModel):
     income: PeriodDelta
     expense: PeriodDelta
     net: PeriodDelta
+
+class RecurringTransactionResponse(BaseModel):
+    id: uuid.UUID
+    type: str
+    amount: Decimal
+    currency: str
+    description: Optional[str]
+    frequency: str
+    next_run_date: date
+    end_date: Optional[date]
+    is_active: bool
+    category: CategoryResponse
+
+    class Config:
+        from_attributes = True
+
+
+class CreateRecurringTransactionRequest(BaseModel):
+    type: str
+    amount: Decimal
+    currency: str
+    category_id: uuid.UUID
+    description: Optional[str] = None
+    frequency: str
+    next_run_date: date
+    end_date: Optional[date] = None
+===== ./app/schemas/recurring.py =====
+import uuid
+from datetime import date
+from decimal import Decimal
+from pydantic import BaseModel
+from .category import CategoryResponse
+
+class RecurringTransactionResponse(BaseModel):
+    id: uuid.UUID
+    type: str
+    amount: Decimal
+    currency: str
+    description: str | None
+    frequency: str
+    next_run_date: date
+    end_date: date | None
+    is_active: bool
+    category: CategoryResponse  # Changed from Any to CategoryResponse
+
+    class Config:
+        from_attributes = True
+
+
+class CreateRecurringTransactionRequest(BaseModel):
+    type: str
+    amount: Decimal
+    currency: str
+    category_id: uuid.UUID
+    description: str | None = None
+    frequency: str
+    next_run_date: date
+    end_date: date | None = None
+
 ===== ./app/seeds/default_categories.py =====
 """
 Run once to populate the default_categories table.
@@ -2169,6 +2549,7 @@ if __name__ == "__main__":
 ===== ./app/services/auth.py =====
 import uuid
 
+from pocketledger.backend.app.services import user
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2185,6 +2566,9 @@ from app.repositories.category import CategoryRepository
 from app.repositories.user import UserRepository
 from app.schemas import TokenResponse
 
+from app.core.logging import get_logger
+
+logger = get_logger("auth")
 
 class AuthService:
     def __init__(self, db: AsyncSession, redis: aioredis.Redis):
@@ -2207,6 +2591,7 @@ class AuthService:
 
         await self.category_repo.seed_defaults_for_user(user.id)
         tokens = await self._issue_tokens(user.id)
+        logger.info("auth.registered", user_id=str(user.id), email=email)
         return user, tokens
 
     async def login(self, email: str, password: str) -> tuple[dict, TokenResponse]:
@@ -2216,8 +2601,8 @@ class AuthService:
 
         if user.is_deleted:
             raise UnauthorizedError("Account has been deactivated")
-
         tokens = await self._issue_tokens(user.id)
+        logger.info("auth.login_success", user_id=str(user.id))
         return user, tokens
 
     async def refresh(self, refresh_token: str) -> TokenResponse:
@@ -2359,6 +2744,75 @@ class CategoryService:
             raise ConflictError("Category has an active budget — delete it before deleting this category")
         await self.repo.soft_delete(id)
 
+===== ./app/services/export.py =====
+import csv
+import io
+from datetime import date
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import User
+from app.repositories.transaction import TransactionRepository
+
+
+class ExportService:
+    def __init__(self, db: AsyncSession):
+        self.repo = TransactionRepository(db)
+
+    async def transactions_csv(
+        self,
+        user: User,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        type: str | None = None,
+    ) -> io.StringIO:
+        transactions, _ = await self.repo.get_paginated(
+            user_id=user.id,
+            start_date=start_date,
+            end_date=end_date,
+            type=type,
+            page=1,
+            limit=10000,
+        )
+
+        buffer = io.StringIO()
+        writer = csv.DictWriter(
+            buffer,
+            fieldnames=[
+                "id",
+                "date",
+                "type",
+                "category",
+                "description",
+                "amount",
+                "currency",
+                "amount_in_base",
+                "base_currency",
+                "exchange_rate",
+                "source",
+                "created_at",
+            ],
+        )
+        writer.writeheader()
+
+        for tx in transactions:
+            writer.writerow({
+                "id": str(tx.id),
+                "date": tx.transaction_date.isoformat(),
+                "type": tx.type,
+                "category": tx.category.name if tx.category else "",
+                "description": tx.description or "",
+                "amount": str(tx.amount),
+                "currency": tx.currency,
+                "amount_in_base": str(tx.amount_in_base),
+                "base_currency": user.base_currency,
+                "exchange_rate": str(tx.exchange_rate_to_base),
+                "source": tx.source,
+                "created_at": tx.created_at.isoformat(),
+            })
+
+        buffer.seek(0)
+        return buffer
 ===== ./app/services/__init__.py =====
 
 ===== ./app/services/notification.py =====
@@ -2698,6 +3152,9 @@ from app.repositories.transaction import TransactionRepository
 from app.services.notification import NotificationService
 from app.services.rate import RateService
 
+from app.core.logging import get_logger
+
+logger = get_logger("transaction")
 
 class TransactionService:
     def __init__(self, db: AsyncSession, redis: aioredis.Redis):
@@ -2705,6 +3162,14 @@ class TransactionService:
         self.repo = TransactionRepository(db)
         self.rate_service = RateService(db, redis)
         self.audit_repo = AuditLogRepository(db)
+
+    async def get(self, user: User, id: uuid.UUID):
+        tx = await self.repo.get_by_id(id)
+        if not tx:
+            raise NotFoundError("Transaction not found")
+        if tx.user_id != user.id:
+            raise ForbiddenError()
+        return tx
 
     async def list(self, user: User, **filters) -> tuple[list, int]:
         return await self.repo.get_paginated(user_id=user.id, **filters)
@@ -2738,6 +3203,17 @@ class TransactionService:
             "source": source,
             "recurring_transaction_id": recurring_transaction_id,
         })
+
+        logger.info(
+            "transaction.created",
+            transaction_id=str(tx.id),
+            user_id=str(user.id),
+            type=type,
+            amount=str(amount),
+            currency=currency,
+            amount_in_base=str(amount_in_base),
+            source=source,
+        )
 
         if type == "expense" and background_tasks is not None:
             background_tasks.add_task(
@@ -2775,6 +3251,13 @@ class TransactionService:
         if audit_entries:
             await self.audit_repo.bulk_create(audit_entries)
 
+            logger.info(
+                "transaction.updated",
+                transaction_id=str(id),
+                user_id=str(user.id),
+                fields_changed=list(changes.keys()),
+            )
+
         return await self.repo.update(id, changes)
 
     async def delete(self, user: User, id: uuid.UUID) -> None:
@@ -2784,14 +3267,6 @@ class TransactionService:
         if tx.user_id != user.id:
             raise ForbiddenError()
         await self.repo.soft_delete(id)
-
-    async def get(self, user: User, id: uuid.UUID):
-        tx = await self.repo.get_by_id(id)
-        if not tx:
-            raise NotFoundError("Transaction not found")
-        if tx.user_id != user.id:
-            raise ForbiddenError()
-        return tx
 ===== ./app/services/user.py =====
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2822,6 +3297,8 @@ class UserService:
 
     async def delete(self, user: User) -> None:
         await self.repo.soft_delete(user.id)
+
+===== ./app/utils/__init__.py =====
 
 ===== ./app/utils/period.py =====
 from datetime import date
@@ -2952,6 +3429,71 @@ async def auth_client(client: AsyncClient) -> AsyncClient:
     return client
 ===== ./tests/__init__.py =====
 
+===== ./tests/test_audit_log.py =====
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models import TransactionAuditLog
+
+
+@pytest.mark.asyncio
+async def test_transaction_update_creates_audit_log(auth_client: AsyncClient, db: AsyncSession):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    create_resp = await auth_client.post("/api/v1/transactions/", json={
+        "type": "expense",
+        "amount": "1000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "description": "original",
+        "transaction_date": "2026-04-15",
+    })
+    tx_id = create_resp.json()["data"]["id"]
+
+    await auth_client.patch(f"/api/v1/transactions/{tx_id}", json={
+        "description": "updated",
+    })
+
+    result = await db.execute(
+        select(TransactionAuditLog).where(
+            TransactionAuditLog.transaction_id == tx_id
+        )
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 1
+    assert logs[0].field == "description"
+    assert logs[0].old_value == "original"
+    assert logs[0].new_value == "updated"
+
+
+@pytest.mark.asyncio
+async def test_unchanged_fields_not_audited(auth_client: AsyncClient, db: AsyncSession):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    create_resp = await auth_client.post("/api/v1/transactions/", json={
+        "type": "expense",
+        "amount": "1000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "description": "same",
+        "transaction_date": "2026-04-15",
+    })
+    tx_id = create_resp.json()["data"]["id"]
+
+    await auth_client.patch(f"/api/v1/transactions/{tx_id}", json={
+        "description": "same",
+    })
+
+    result = await db.execute(
+        select(TransactionAuditLog).where(
+            TransactionAuditLog.transaction_id == tx_id
+        )
+    )
+    logs = result.scalars().all()
+    assert len(logs) == 0
 ===== ./tests/test_auth.py =====
 import pytest
 from httpx import AsyncClient
@@ -2992,3 +3534,336 @@ async def test_protected_route_without_token(client: AsyncClient):
     response = await client.get("/api/v1/users/me")
     assert response.status_code == 403
 
+===== ./tests/test_exports.py =====
+import csv
+import io
+import uuid
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_export_returns_csv(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    for i in range(3):
+        await auth_client.post("/api/v1/transactions/", json={
+            "type": "expense",
+            "amount": str(1000 + i * 500),
+            "currency": "NGN",
+            "category_id": category_id,
+            "description": f"expense {i}",
+            "transaction_date": "2026-04-15",
+        }, headers={"Idempotency-Key": str(uuid.uuid4())})
+
+    response = await auth_client.get("/api/v1/exports/transactions")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/csv; charset=utf-8"
+    assert "attachment" in response.headers["content-disposition"]
+    assert "pocketledger" in response.headers["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_export_csv_structure(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    await auth_client.post("/api/v1/transactions/", json={
+        "type": "expense",
+        "amount": "2500",
+        "currency": "NGN",
+        "category_id": category_id,
+        "description": "test export row",
+        "transaction_date": "2026-04-15",
+    }, headers={"Idempotency-Key": str(uuid.uuid4())})
+
+    response = await auth_client.get("/api/v1/exports/transactions")
+    reader = csv.DictReader(io.StringIO(response.text))
+    rows = list(reader)
+
+    assert len(rows) >= 1
+    row = rows[0]
+    assert "id" in row
+    assert "date" in row
+    assert "type" in row
+    assert "category" in row
+    assert "amount" in row
+    assert "currency" in row
+    assert row["currency"] == "NGN"
+
+
+@pytest.mark.asyncio
+async def test_export_filter_by_type(auth_client: AsyncClient):
+    cat_expense = (await auth_client.get("/api/v1/categories/?type=expense")).json()["data"][0]["id"]
+    cat_income = (await auth_client.get("/api/v1/categories/?type=income")).json()["data"][0]["id"]
+
+    await auth_client.post("/api/v1/transactions/", json={
+        "type": "expense",
+        "amount": "1000",
+        "currency": "NGN",
+        "category_id": cat_expense,
+        "transaction_date": "2026-04-15",
+    }, headers={"Idempotency-Key": str(uuid.uuid4())})
+
+    await auth_client.post("/api/v1/transactions/", json={
+        "type": "income",
+        "amount": "5000",
+        "currency": "NGN",
+        "category_id": cat_income,
+        "transaction_date": "2026-04-15",
+    }, headers={"Idempotency-Key": str(uuid.uuid4())})
+
+    response = await auth_client.get("/api/v1/exports/transactions?type=expense")
+    reader = csv.DictReader(io.StringIO(response.text))
+    rows = list(reader)
+
+    assert all(row["type"] == "expense" for row in rows)
+===== ./tests/test_idempotency.py =====
+import uuid
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_required(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    response = await auth_client.post("/api/v1/transactions/", json={
+        "type": "expense",
+        "amount": "1000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "transaction_date": "2026-04-15",
+    })
+    assert response.status_code == 400
+    assert "Idempotency-Key" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_idempotency_prevents_duplicate(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    key = str(uuid.uuid4())
+    payload = {
+        "type": "expense",
+        "amount": "1000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "transaction_date": "2026-04-15",
+    }
+
+    first = await auth_client.post(
+        "/api/v1/transactions/",
+        json=payload,
+        headers={"Idempotency-Key": key},
+    )
+    second = await auth_client.post(
+        "/api/v1/transactions/",
+        json=payload,
+        headers={"Idempotency-Key": key},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["data"]["id"] == second.json()["data"]["id"]
+    assert second.headers.get("X-Idempotent-Replayed") == "true"
+
+
+@pytest.mark.asyncio
+async def test_different_keys_create_different_transactions(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    payload = {
+        "type": "expense",
+        "amount": "1000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "transaction_date": "2026-04-15",
+    }
+
+    first = await auth_client.post(
+        "/api/v1/transactions/",
+        json=payload,
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+    )
+    second = await auth_client.post(
+        "/api/v1/transactions/",
+        json=payload,
+        headers={"Idempotency-Key": str(uuid.uuid4())},
+    )
+
+    assert first.json()["data"]["id"] != second.json()["data"]["id"]
+===== ./tests/test_notifications.py =====
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_budget_threshold_notification(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    await auth_client.post("/api/v1/budgets/", json={
+        "category_id": category_id,
+        "amount": "10000",
+        "currency": "NGN",
+        "period": "monthly",
+        "start_date": "2026-01-01",
+        "is_recurring": True,
+    })
+
+    await auth_client.post("/api/v1/transactions/", json={
+        "type": "expense",
+        "amount": "8500",
+        "currency": "NGN",
+        "category_id": category_id,
+        "transaction_date": "2026-04-15",
+    })
+
+    import asyncio
+    await asyncio.sleep(0.1)
+
+    resp = await auth_client.get("/api/v1/notifications/")
+    assert resp.status_code == 200
+    notifications = resp.json()["data"]
+    thresholds = [n["threshold"] for n in notifications]
+    assert 80 in thresholds
+    assert 100 not in thresholds
+
+
+@pytest.mark.asyncio
+async def test_no_duplicate_notifications(auth_client: AsyncClient):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    await auth_client.post("/api/v1/budgets/", json={
+        "category_id": category_id,
+        "amount": "10000",
+        "currency": "NGN",
+        "period": "monthly",
+        "start_date": "2026-01-01",
+        "is_recurring": True,
+    })
+
+    for _ in range(3):
+        await auth_client.post("/api/v1/transactions/", json={
+            "type": "expense",
+            "amount": "3500",
+            "currency": "NGN",
+            "category_id": category_id,
+            "transaction_date": "2026-04-15",
+        })
+
+    import asyncio
+    await asyncio.sleep(0.1)
+
+    resp = await auth_client.get("/api/v1/notifications/")
+    notifications = resp.json()["data"]
+    threshold_100_count = sum(1 for n in notifications if n["threshold"] == 100)
+    assert threshold_100_count == 1
+===== ./tests/test_rate_limit.py =====
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_triggers(client: AsyncClient):
+    for _ in range(60):
+        await client.get("/health")
+
+    response = await client.get("/health")
+    assert response.status_code == 200
+
+@pytest.mark.asyncio
+async def test_rate_limit_returns_429(client: AsyncClient):
+    for _ in range(61):
+        response = await client.get("/api/v1/users/me")
+
+    assert response.status_code in (401, 429)
+===== ./tests/test_recurring.py =====
+import pytest
+from datetime import date
+from httpx import AsyncClient
+from app.scheduler import materialize_recurring_transactions
+
+
+@pytest.mark.asyncio
+async def test_recurring_transaction_materialization(auth_client: AsyncClient, db):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    today = date.today().isoformat()
+
+    await auth_client.post("/api/v1/recurring/", json={
+        "type": "expense",
+        "amount": "5000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "frequency": "monthly",
+        "next_run_date": today,
+    })
+
+    await materialize_recurring_transactions()
+
+    resp = await auth_client.get("/api/v1/transactions/?source=recurring")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["total"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_recurring_idempotency(auth_client: AsyncClient, db):
+    cat_resp = await auth_client.get("/api/v1/categories/?type=expense")
+    category_id = cat_resp.json()["data"][0]["id"]
+
+    today = date.today().isoformat()
+
+    await auth_client.post("/api/v1/recurring/", json={
+        "type": "expense",
+        "amount": "5000",
+        "currency": "NGN",
+        "category_id": category_id,
+        "frequency": "monthly",
+        "next_run_date": today,
+    })
+
+    await materialize_recurring_transactions()
+    await materialize_recurring_transactions()
+
+    resp = await auth_client.get("/api/v1/transactions/?source=recurring")
+    total = resp.json()["data"]["total"]
+    assert total == 1
+===== ./tests/test_reports.py =====
+import pytest
+from httpx import AsyncClient
+
+
+@pytest.mark.asyncio
+async def test_comparison_report_structure(auth_client: AsyncClient):
+    resp = await auth_client.get("/api/v1/reports/comparison?period=monthly")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+
+    assert "current_period" in data
+    assert "previous_period" in data
+    assert "income" in data
+    assert "expense" in data
+    assert "net" in data
+
+    for key in ["income", "expense", "net"]:
+        assert "current" in data[key]
+        assert "previous" in data[key]
+        assert "absolute" in data[key]
+        assert "percentage" in data[key]
+
+
+@pytest.mark.asyncio
+async def test_comparison_percentage_null_when_no_previous_data(auth_client: AsyncClient):
+    resp = await auth_client.get("/api/v1/reports/comparison?period=monthly")
+    data = resp.json()["data"]
+    assert data["income"]["percentage"] is None
+    assert data["expense"]["percentage"] is None
