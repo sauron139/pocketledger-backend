@@ -4,6 +4,7 @@ from datetime import date
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models import RecurringTransaction, Transaction
 from app.repositories.base import BaseRepository
@@ -13,18 +14,36 @@ class RecurringTransactionRepository(BaseRepository[RecurringTransaction]):
     def __init__(self, db: AsyncSession):
         super().__init__(RecurringTransaction, db)
 
+    async def get_by_id(self, id: uuid.UUID) -> RecurringTransaction | None:
+        result = await self.db.execute(
+            select(RecurringTransaction)
+            .where(RecurringTransaction.id == id, RecurringTransaction.is_deleted == False)
+            .options(selectinload(RecurringTransaction.category))
+        )
+        return result.scalar_one_or_none()
+
+    async def create(self, data: dict) -> RecurringTransaction:
+        instance = RecurringTransaction(**data)
+        self.db.add(instance)
+        await self.db.commit()
+        await self.db.refresh(instance)
+        return await self.get_by_id(instance.id)
+
     async def get_all_for_user(self, user_id: uuid.UUID) -> list[RecurringTransaction]:
         result = await self.db.execute(
-            select(RecurringTransaction).where(
+            select(RecurringTransaction)
+            .where(
                 RecurringTransaction.user_id == user_id,
                 RecurringTransaction.is_deleted == False,
             )
+            .options(selectinload(RecurringTransaction.category))
         )
         return list(result.scalars().all())
 
     async def get_due(self, today: date) -> list[RecurringTransaction]:
         result = await self.db.execute(
-            select(RecurringTransaction).where(
+            select(RecurringTransaction)
+            .where(
                 RecurringTransaction.next_run_date <= today,
                 RecurringTransaction.is_active == True,
                 RecurringTransaction.is_deleted == False,
@@ -33,6 +52,7 @@ class RecurringTransactionRepository(BaseRepository[RecurringTransaction]):
                     RecurringTransaction.end_date >= today,
                 ),
             )
+            .options(selectinload(RecurringTransaction.category))
         )
         return list(result.scalars().all())
 

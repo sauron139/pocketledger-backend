@@ -1,6 +1,5 @@
 import uuid
 
-from pocketledger.backend.app.services import user
 import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession
 

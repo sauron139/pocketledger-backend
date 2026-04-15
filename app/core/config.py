@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     EXCHANGE_RATE_API_KEY: str = "dummy"
     EXCHANGE_RATE_API_URL: str = "https://openexchangerates.org/api"
     EXCHANGE_RATE_CACHE_TTL: int = 3600
+    EXCHANGE_RATE_API_TIMEOUT: int = 10
     ENVIRONMENT: str = "development"
     PORT: int = 8000
 

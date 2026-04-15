@@ -8,21 +8,21 @@ from app.models import Budget
 from app.repositories.base import BaseRepository
 
 
-async def get_active_for_category(
-    self, user_id: uuid.UUID, category_id: uuid.UUID
-) -> list[Budget]:
-    result = await self.db.execute(
-        select(Budget).where(
-            Budget.user_id == user_id,
-            Budget.category_id == category_id,
-            Budget.is_deleted == False,
-        )
-    )
-    return list(result.scalars().all())
-
 class BudgetRepository(BaseRepository[Budget]):
     def __init__(self, db: AsyncSession):
         super().__init__(Budget, db)
+
+    async def get_active_for_category(
+        self, user_id: uuid.UUID, category_id: uuid.UUID
+    ) -> list[Budget]:
+        result = await self.db.execute(
+            select(Budget).where(
+                Budget.user_id == user_id,
+                Budget.category_id == category_id,
+                Budget.is_deleted == False,
+            )
+        )
+        return list(result.scalars().all())
 
     async def get_by_id(self, id: uuid.UUID) -> Budget | None:
         result = await self.db.execute(

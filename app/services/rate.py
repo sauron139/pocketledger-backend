@@ -39,11 +39,18 @@ class RateService:
             raise AppException(503, f"Exchange rate unavailable for {from_currency}/{to_currency} and no cached snapshot exists")
 
     async def _fetch_from_provider(self, from_currency: str, to_currency: str) -> Decimal:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{settings.EXCHANGE_RATE_API_URL}/latest.json",
-                params={"app_id": settings.EXCHANGE_RATE_API_KEY, "base": from_currency, "symbols": to_currency},
-            )
+        timeout = httpx.Timeout(settings.EXCHANGE_RATE_API_TIMEOUT, connect=settings.EXCHANGE_RATE_API_TIMEOUT)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                response = await client.get(
+                    f"{settings.EXCHANGE_RATE_API_URL}/latest.json",
+                    params={"app_id": settings.EXCHANGE_RATE_API_KEY, "base": from_currency, "symbols": to_currency},
+                )
+            except httpx.ReadTimeout:
+                raise AppException(503, "Exchange rate provider timed out")
+            except httpx.RequestError as exc:
+                raise AppException(502, f"Exchange rate provider request failed: {exc}")
+
             if response.status_code != 200:
                 raise AppException(502, "Exchange rate service unavailable")
 
