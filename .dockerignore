@@ -7,3 +7,4 @@ env/
 venv/
 .git
 .gitignore
+.pytest_cache/
