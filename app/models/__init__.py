@@ -52,7 +52,6 @@ class Category(BaseModel):
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="category")
     budgets: Mapped[list["Budget"]] = relationship(back_populates="category")
 
-
 class Transaction(BaseModel):
     __tablename__ = "transactions"
     __table_args__ = (

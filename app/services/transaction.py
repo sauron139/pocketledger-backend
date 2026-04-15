@@ -21,6 +21,14 @@ class TransactionService:
         self.rate_service = RateService(db, redis)
         self.audit_repo = AuditLogRepository(db)
 
+    async def get(self, user: User, id: uuid.UUID):
+        tx = await self.repo.get_by_id(id)
+        if not tx:
+            raise NotFoundError("Transaction not found")
+        if tx.user_id != user.id:
+            raise ForbiddenError()
+        return tx
+
     async def list(self, user: User, **filters) -> tuple[list, int]:
         return await self.repo.get_paginated(user_id=user.id, **filters)
 
@@ -99,11 +107,3 @@ class TransactionService:
         if tx.user_id != user.id:
             raise ForbiddenError()
         await self.repo.soft_delete(id)
-
-    async def get(self, user: User, id: uuid.UUID):
-        tx = await self.repo.get_by_id(id)
-        if not tx:
-            raise NotFoundError("Transaction not found")
-        if tx.user_id != user.id:
-            raise ForbiddenError()
-        return tx

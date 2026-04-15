@@ -3,7 +3,7 @@ from datetime import date
 from typing import Optional
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db, get_redis
@@ -17,6 +17,8 @@ from app.schemas import (
     UpdateTransactionRequest,
 )
 from app.services.transaction import TransactionService
+from app.core.idempotency import idempotency_guard, store_idempotent_response
+
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -57,8 +59,9 @@ async def list_transactions(
     )
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(idempotency_guard)])
 async def create_transaction(
+    request: Request,
     body: CreateTransactionRequest,
     background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
@@ -76,7 +79,9 @@ async def create_transaction(
         transaction_date=body.transaction_date,
         background_tasks=background_tasks,
     )
-    return APIResponse(data=TransactionResponse.model_validate(tx))
+    response_data = APIResponse(data=TransactionResponse.model_validate(tx)).model_dump(mode="json")
+    await store_idempotent_response(request, response_data)
+    return response_data
 
 
 @router.get("/{id}")

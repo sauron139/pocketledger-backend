@@ -7,6 +7,8 @@ from app.api.v1.router import router
 from app.core.exceptions import AppException, app_exception_handler, generic_exception_handler
 from app.scheduler import create_scheduler
 
+from app.middleware.rate_limit import RateLimitMiddleware
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,6 +36,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(RateLimitMiddleware, requests_per_minute=60)
 
 app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)
