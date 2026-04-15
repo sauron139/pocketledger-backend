@@ -27,7 +27,17 @@ class AuthService:
         self.user_repo = UserRepository(db)
         self.category_repo = CategoryRepository(db)
 
-    async def register(self, email: str, password: str, base_currency: str) -> tuple[dict, TokenResponse]:
+    async def register(
+        self,
+        email: str,
+        password: str,
+        first_name: str,
+        last_name: str,
+        base_currency: str,
+        middle_name: str | None = None,
+        phone_number: str | None = None,
+        address: str | None = None,
+    ) -> tuple[dict, TokenResponse]:
         existing = await self.user_repo.get_by_email(email)
         if existing:
             raise ConflictError("Email already registered")
@@ -35,13 +45,17 @@ class AuthService:
         user = await self.user_repo.create({
             "email": email,
             "hashed_password": hash_password(password),
+            "first_name": first_name,
+            "last_name": last_name,
+            "middle_name": middle_name,
+            "phone_number": phone_number,
+            "address": address,
             "base_currency": base_currency,
             "role": "user",
         })
 
         await self.category_repo.seed_defaults_for_user(user.id)
         tokens = await self._issue_tokens(user.id)
-        logger.info("auth.registered", user_id=str(user.id), email=email)
         return user, tokens
 
     async def login(self, email: str, password: str) -> tuple[dict, TokenResponse]:

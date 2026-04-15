@@ -17,7 +17,16 @@ async def register(
     redis: aioredis.Redis = Depends(get_redis),
 ):
     service = AuthService(db, redis)
-    user, tokens = await service.register(body.email, body.password, body.base_currency)
+    user, tokens = await service.register(
+        email=body.email,
+        password=body.password,
+        first_name=body.first_name,
+        last_name=body.last_name,
+        middle_name=body.middle_name,
+        phone_number=body.phone_number,
+        address=body.address,
+        base_currency=body.base_currency,
+    )
     return APIResponse(data={"user": UserResponse.model_validate(user), **tokens.model_dump()})
 
 

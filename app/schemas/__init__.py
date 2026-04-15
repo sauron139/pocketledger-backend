@@ -48,9 +48,15 @@ class RefreshRequest(BaseModel):
 class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
+    first_name: str
+    last_name: str
+    middle_name: Optional[str]
+    phone_number: Optional[str]
+    address: Optional[str]
     base_currency: str
     role: str
     created_at: datetime
+    
 
     class Config:
         from_attributes = True
@@ -58,6 +64,11 @@ class UserResponse(BaseModel):
 
 class UpdateUserRequest(BaseModel):
     email: Optional[EmailStr] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    middle_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    address: Optional[str] = None
     base_currency: Optional[str] = None
 
 
